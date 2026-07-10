@@ -68,7 +68,7 @@ def check_market_health(days=250, z_window=30, rolling_adf_window=90):
     """
     raw = load_recent_data(days=days)
     if len(raw) < rolling_adf_window + 30:
-        print(f"Замало даних: потрібно принаймні {rolling_adf_window + 30} днів")
+        print(f"Not enough data: need at least {rolling_adf_window + 30} days")
         return None
 
     df = raw.copy()
@@ -112,7 +112,7 @@ def check_market_health(days=250, z_window=30, rolling_adf_window=90):
     }
 
 
-def describe_trade_action(health, capital_usd=100_000, target_annual_vol=0.10):
+def describe_trade_action(health, capital_usd=100_000, target_annual_vol=0.10, entry=1.8):
     """
     Translates the abstract position signal (+1/-1/0) into concrete futures
     contracts: how many WTI (CL=F) and Brent (BZ=F) contracts, and which
@@ -124,10 +124,10 @@ def describe_trade_action(health, capital_usd=100_000, target_annual_vol=0.10):
     beta = health["beta"]
     wti_price = health["wti"]
 
-    if not health["locally_stationary"] or not health["mr_regime"] or abs(z) < 1.8:
+    if not health["locally_stationary"] or not health["mr_regime"] or abs(z) < entry:
         return None  # no entry signal - nothing to size
 
-    # direction: z > entry means spread (Brent side) is "too expensive"
+    # direction: z > entry means the spread (Brent side) is "too expensive"
     # relative to beta*WTI -> short the spread: sell Brent leg, buy WTI leg.
     # z < -entry is the mirror case.
     if z > 0:
@@ -137,24 +137,20 @@ def describe_trade_action(health, capital_usd=100_000, target_annual_vol=0.10):
 
     # Position sizing: rough approximation of main.py's risk_scale idea
     # (target vol / portfolio vol), using capital and a fixed fraction since
-    # full EWMA portfolio vol isn't recomputed in this lightweight check.
-    # Treat this as a starting point, not a precise sizing model.
+    # the full EWMA portfolio-variance model isn't recomputed in this
+    # lightweight check. Treat this as a starting point, not a precise
+    # sizing model.
     notional = capital_usd * target_annual_vol
     wti_contracts = notional / (wti_price * CONTRACT_SIZE)
     brent_contracts = wti_contracts * beta
 
     if round(wti_contracts) == 0:
-        return {"error": f"Розрахований розмір ({wti_contracts:.3f} контракти) менший за 1 -"
-                         f" при капіталі ${capital_usd:,} ця стратегія не може бути виконана"
-                         f" на цілих контрактах. Потрібен капітал щонайменше "
-                         f"${(wti_price * CONTRACT_SIZE / target_annual_vol):,.0f}."}
-
-    return {
-        "brent_action": brent_side,
-        "brent_contracts": round(brent_contracts),
-        "wti_action": wti_side,
-        "wti_contracts": round(wti_contracts),
-    }
+        min_capital = wti_price * CONTRACT_SIZE / target_annual_vol
+        return {
+            "error": f"Computed size ({wti_contracts:.3f} contracts) is below 1 - "
+                     f"with capital ${capital_usd:,} this strategy cannot be executed "
+                     f"in whole contracts. Minimum capital needed: ${min_capital:,.0f}."
+        }
 
     return {
         "brent_action": brent_side,
@@ -167,35 +163,38 @@ def describe_trade_action(health, capital_usd=100_000, target_annual_vol=0.10):
 if __name__ == "__main__":
     health = check_market_health()
     if health:
-        print(f"Дата: {health['date'].date()}")
+        print(f"Date: {health['date'].date()}")
         print(f"WTI: ${health['wti']:.2f}   Brent: ${health['brent']:.2f}")
-        print(f"Бета: {health['beta']:.4f}")
-        print(f"Спред (log): {health['spread']:.4f}")
+        print(f"Beta: {health['beta']:.4f}")
+        print(f"Spread (log): {health['spread']:.4f}")
         print(f"Z-score: {health['z']:.2f}")
-        print(f"Режим (спокійний ринок): {health['mr_regime']}")
+        print(f"Regime (calm market): {health['mr_regime']}")
         print(f"Rolling ADF p-value (90d): {health['rolling_adf_pvalue']:.4f}")
-        print(f"Локально стаціонарний: {health['locally_stationary']}")
+        print(f"Locally stationary: {health['locally_stationary']}")
 
-        print("\n=== ВИСНОВОК ===")
+        print("\n=== CONCLUSION ===")
         if not health["locally_stationary"]:
-            print("Спред НЕ стаціонарний на короткому вікні -"
-                  " короткострокова mean-reversion гіпотеза зараз не підтверджена.")
+            print("Spread is NOT stationary on the short window - "
+                  "the short-horizon mean-reversion hypothesis is not "
+                  "currently supported.")
         elif not health["mr_regime"]:
-            print("Ринок зараз занадто волатильний (regime filter вимкнений).")
+            print("Market is currently too volatile (regime filter is off).")
         elif abs(health["z"]) < 1.8:
-            print(f"Спред у нормальному діапазоні (z={health['z']:.2f}, поріг входу 1.8) -"
-                  " сигналу на вхід немає.")
+            print(f"Spread is within its normal range (z={health['z']:.2f}, "
+                  f"entry threshold 1.8) - no entry signal.")
         else:
-            direction = "шорт-спред (short Brent-leg, long beta*WTI-leg)" if health["z"] > 0 \
-                else "лонг-спред (long Brent-leg, short beta*WTI-leg)"
-            print(f"Умови виконані: локально стаціонарний, спокійний режим, "
-                  f"z={health['z']:.2f} за межею входу -> сигнал: {direction}")
+            direction = "short-spread (short Brent-leg, long beta*WTI-leg)" if health["z"] > 0 \
+                else "long-spread (long Brent-leg, short beta*WTI-leg)"
+            print(f"Conditions met: locally stationary, calm regime, "
+                  f"z={health['z']:.2f} beyond entry threshold -> signal: {direction}")
 
             trade = describe_trade_action(health)
             if trade:
                 if "error" in trade:
-                    print(f"\n=== КОНКРЕТНА ДІЯ ===\n{trade['error']}")
+                    print(f"\n=== SPECIFIC ACTION ===\n{trade['error']}")
                 else:
-                    print("\n=== КОНКРЕТНА ДІЯ ===")
-                    print(f"Brent (BZ=F): {trade['brent_action']} {trade['brent_contracts']} контрактів")
-                    print(f"WTI   (CL=F): {trade['wti_action']} {trade['wti_contracts']} контрактів")
+                    print("\n=== SPECIFIC ACTION ===")
+                    print(f"Brent (BZ=F): {trade['brent_action']} {trade['brent_contracts']} contracts")
+                    print(f"WTI   (CL=F): {trade['wti_action']} {trade['wti_contracts']} contracts")
+                    print("(sized for $100,000 capital and a 10%/yr risk target - "
+                          "pass capital_usd=... to describe_trade_action() to match your own capital)")

@@ -46,13 +46,20 @@ P = 1.0       # estimate uncertainty (variance of beta)
 Q = 1e-6      # process noise: how much beta is allowed to drift per step
 R = 0.01      # observation noise: how much we trust today's price pair
 
+# precomputed once, outside the loop: df["Brent"].pct_change() used to be
+# recalculated on the whole series every iteration (O(n^2) instead of O(n)).
+# Same fix already used in market_check.py, carried back here.
+x_arr = df["x"].values
+y_arr = df["y"].values
+brent_pct = df["Brent"].pct_change().values
+
 for t in range(1, n):
-    x = df["x"].iloc[t]
-    y = df["y"].iloc[t]
+    x = x_arr[t]
+    y = y_arr[t]
 
     # scale both noise terms up on volatile days, so beta reacts faster
     # when the market is moving a lot, and stays stable when it's quiet
-    vol = abs(df["Brent"].pct_change().iloc[t]) if t > 1 else 0.0
+    vol = abs(brent_pct[t]) if t > 1 and not np.isnan(brent_pct[t]) else 0.0
     Q_t = Q * (1 + 10 * vol)
     R_t = R * (1 + 5 * vol)
 

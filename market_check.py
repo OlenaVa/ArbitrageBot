@@ -1,7 +1,21 @@
+"""
+market_check.py - "should we trade right now?"
+
+v3 change: the Kalman filter / z-score / regime filter that used to be
+duplicated here (identical Q/R/clip/smoothing constants, pasted from
+main.py) now come from spread_model.py + config.py. This file can no longer
+silently drift from what main.py's backtest actually did - both call the
+exact same functions with the exact same StrategyConfig.
+"""
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from statsmodels.tsa.stattools import adfuller
+
+from config import StrategyConfig
+import spread_model as sm
+
+DEFAULT_CONFIG = StrategyConfig()
 
 
 def load_recent_data(days=250):
@@ -24,48 +38,14 @@ def load_recent_data(days=250):
     return raw
 
 
-def compute_beta_and_spread(df):
-    """Same Kalman filter as main.py, so the traded object is identical."""
-    n = len(df)
-    beta = np.zeros(n)
-    beta[0] = 1.0
-    P = 1.0
-    Q = 1e-6
-    R = 0.01
-
-    x_arr = df["x"].values
-    y_arr = df["y"].values
-    brent_pct = df["Brent"].pct_change().values
-
-    for t in range(1, n):
-        x = x_arr[t]
-        y = y_arr[t]
-        vol = abs(brent_pct[t]) if t > 1 and not np.isnan(brent_pct[t]) else 0.0
-
-        Q_t = Q * (1 + 10 * vol)
-        R_t = R * (1 + 5 * vol)
-        P_pred = P + Q_t
-
-        err = y - beta[t - 1] * x
-        S = x * P_pred * x + R_t
-        K = P_pred * x / (S + 1e-12)
-
-        raw_beta = beta[t - 1] + K * err
-        raw_beta = np.clip(raw_beta, 0.5, 2.0)
-        beta[t] = 0.98 * beta[t - 1] + 0.02 * raw_beta
-
-        P = (1 - K * x) * P_pred
-
-    df["beta"] = beta
-    df["spread"] = df["y"] - df["beta"] * df["x"]
-    return df
-
-
-def check_market_health(days=250, z_window=30, rolling_adf_window=90):
+def check_market_health(days=250, rolling_adf_window=90, config: StrategyConfig = None):
     """
-    Answers "should we trade right now" - using the SAME beta/spread
-    definition as main.py's backtest, on a recent (short) window.
+    Answers "should we trade right now" - using spread_model.py, the SAME
+    beta/spread/z/regime definitions as main.py's backtest, on a recent
+    (short) window.
     """
+    config = config or DEFAULT_CONFIG
+
     raw = load_recent_data(days=days)
     if len(raw) < rolling_adf_window + 30:
         print(f"Not enough data: need at least {rolling_adf_window + 30} days")
@@ -74,17 +54,9 @@ def check_market_health(days=250, z_window=30, rolling_adf_window=90):
     df = raw.copy()
     df["x"] = np.log(df["WTI"])
     df["y"] = np.log(df["Brent"])
-    df = compute_beta_and_spread(df)
-
-    # short-horizon z-score, same window the strategy actually trades on
-    mean = df["spread"].rolling(z_window).mean().shift(1)
-    std = df["spread"].rolling(z_window).std().shift(1)
-    df["z"] = (df["spread"] - mean) / (std + 1e-12)
-
-    # regime filter, same construction as main.py
-    ret = df["spread"].diff()
-    vol = ret.rolling(20).std()
-    df["mr_regime"] = (vol < vol.rolling(100).quantile(0.7)).shift(1).fillna(0)
+    df, kalman_diag = sm.compute_beta_and_spread(df, config)
+    df = sm.compute_zscore(df, config)
+    df = sm.compute_regime_filter(df, config)
 
     # rolling ADF: is the spread stationary on a recent window, not just
     # over the multi-year backtest - this is the actual "trade now?" check
@@ -109,20 +81,24 @@ def check_market_health(days=250, z_window=30, rolling_adf_window=90):
         "mr_regime": bool(df["mr_regime"].iloc[-1]),
         "rolling_adf_pvalue": df["rolling_adf_pvalue"].iloc[-1],
         "locally_stationary": df["rolling_adf_pvalue"].iloc[-1] < 0.05,
+        "kalman_diagnostics": kalman_diag,
     }
 
 
-def describe_trade_action(health, capital_usd=100_000, target_annual_vol=0.10, entry=1.8):
+def describe_trade_action(health, capital_usd=100_000, config: StrategyConfig = None):
     """
     Translates the abstract position signal (+1/-1/0) into concrete futures
     contracts: how many WTI (CL=F) and Brent (BZ=F) contracts, and which
     side of each. 1 contract = 1000 barrels for both CL and BZ.
     """
+    config = config or DEFAULT_CONFIG
     CONTRACT_SIZE = 1000  # barrels per futures contract
 
     z = health["z"]
     beta = health["beta"]
     wti_price = health["wti"]
+    entry = config.entry_threshold
+    target_annual_vol = config.target_annual_vol
 
     if not health["locally_stationary"] or not health["mr_regime"] or abs(z) < entry:
         return None  # no entry signal - nothing to size
@@ -166,6 +142,7 @@ if __name__ == "__main__":
         print(f"Date: {health['date'].date()}")
         print(f"WTI: ${health['wti']:.2f}   Brent: ${health['brent']:.2f}")
         print(f"Beta: {health['beta']:.4f}")
+        print(f"Kalman diagnostics: {health['kalman_diagnostics']}")
         print(f"Spread (log): {health['spread']:.4f}")
         print(f"Z-score: {health['z']:.2f}")
         print(f"Regime (calm market): {health['mr_regime']}")
@@ -179,9 +156,9 @@ if __name__ == "__main__":
                   "currently supported.")
         elif not health["mr_regime"]:
             print("Market is currently too volatile (regime filter is off).")
-        elif abs(health["z"]) < 1.8:
+        elif abs(health["z"]) < DEFAULT_CONFIG.entry_threshold:
             print(f"Spread is within its normal range (z={health['z']:.2f}, "
-                  f"entry threshold 1.8) - no entry signal.")
+                  f"entry threshold {DEFAULT_CONFIG.entry_threshold}) - no entry signal.")
         else:
             direction = "short-spread (short Brent-leg, long beta*WTI-leg)" if health["z"] > 0 \
                 else "long-spread (long Brent-leg, short beta*WTI-leg)"

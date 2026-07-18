@@ -1,8 +1,39 @@
+
+"""
+main.py - full Brent/WTI stat-arb backtest.
+
+v3 changes (this version):
+- Uses shared spread_model.py / config.py instead of duplicating the Kalman
+  filter, z-score, regime filter and risk-scaling logic that also lives in
+  market_check.py. See spread_model.py for why that mattered.
+- Pure Kalman filter: no clip, no smoothing (see spread_model.py docstring).
+  The old [0.5, 2.0] range is now a diagnostic-only warning band.
+- Adds an OU/AR(1) half-life estimate, to justify the z-score window with
+  data instead of "chosen because it seemed reasonable" (section 2.6).
+- Adds a parameter sensitivity sweep over entry/exit thresholds, run ONLY
+  on the 2019-2021 development slice (section 8.6).
+- Adds a transaction-cost stress test at 0.5 / 1.0 / 2.0 bps (section 8.7).
+- The walk-forward split is now explicitly labeled development /
+  validation / final-test (section 8.5) - see README "Known limitations"
+  for what this does and does not yet guarantee.
+- Numba-accelerated core loops in spread_model.py (falls back to pure
+  Python automatically if numba isn't installed - see the printed notice
+  below).
+"""
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 from statsmodels.tsa.stattools import adfuller
+
+from config import StrategyConfig
+import spread_model as sm
+import validation as val
+import costs as ct
+
+config = StrategyConfig()
+
+print(f"Numba JIT: {'enabled' if sm.NUMBA_AVAILABLE else 'not installed - falling back to pure Python (still correct, just slower; pip install numba to enable)'}")
 
 # =====================================================
 # 1. DATA LOADING
@@ -26,229 +57,141 @@ df = pd.DataFrame(index=raw.index)
 df["WTI"] = raw["WTI"]
 df["Brent"] = raw["Brent"]
 
-# Work in log-prices: makes the beta below a ratio of percentage moves,
-# not dollar moves, which is standard for cointegration analysis
+# Work in log-prices: makes beta a ratio of percentage moves, not dollar
+# moves - standard for cointegration analysis.
 df["x"] = np.log(df["WTI"])
 df["y"] = np.log(df["Brent"])
 
-n = len(df)
-
 # =====================================================
-# 2. DYNAMIC HEDGE RATIO VIA KALMAN FILTER
+# 2. DYNAMIC HEDGE RATIO - PURE KALMAN FILTER (spread_model.py)
 # =====================================================
-# Instead of a single fixed beta (Brent = beta * WTI) fit once on the whole
-# history, this estimates beta day by day, letting the relationship drift
-# slowly over time (the true ratio between Brent and WTI is not constant).
-beta = np.zeros(n)
-beta[0] = 1.0
+df, kalman_diag = sm.compute_beta_and_spread(df, config)
+print(f"\nKalman diagnostics: {kalman_diag}")
 
-P = 1.0       # estimate uncertainty (variance of beta)
-Q = 1e-6      # process noise: how much beta is allowed to drift per step
-R = 0.01      # observation noise: how much we trust today's price pair
-
-# precomputed once, outside the loop: df["Brent"].pct_change() used to be
-# recalculated on the whole series every iteration (O(n^2) instead of O(n)).
-# Same fix already used in market_check.py, carried back here.
-x_arr = df["x"].values
-y_arr = df["y"].values
-brent_pct = df["Brent"].pct_change().values
-
-for t in range(1, n):
-    x = x_arr[t]
-    y = y_arr[t]
-
-    # scale both noise terms up on volatile days, so beta reacts faster
-    # when the market is moving a lot, and stays stable when it's quiet
-    vol = abs(brent_pct[t]) if t > 1 and not np.isnan(brent_pct[t]) else 0.0
-    Q_t = Q * (1 + 10 * vol)
-    R_t = R * (1 + 5 * vol)
-
-    P_pred = P + Q_t
-
-    err = y - beta[t-1] * x          # prediction error (innovation)
-    S = x * P_pred * x + R_t         # innovation variance
-    K = P_pred * x / (S + 1e-12)     # Kalman gain
-
-    raw_beta = beta[t-1] + K * err
-
-    # hard bounds: beta is not allowed outside this range regardless of
-    # what the filter computes (an arbitrary safety clamp, not derived
-    # from data - worth revisiting if the true ratio ever moves outside it)
-    raw_beta = np.clip(raw_beta, 0.5, 2.0)
-
-    # extra smoothing on top of the Kalman update, to reduce day-to-day jitter
-    beta[t] = 0.98 * beta[t-1] + 0.02 * raw_beta
-
-    P = (1 - K * x) * P_pred
-
-df["beta"] = beta
-# the traded spread: how far Brent actually is from "beta * WTI"
-df["spread"] = df["y"] - df["beta"] * df["x"]
+# NOTE on methodology change: this used to also clip beta to [0.5, 2.0] and
+# apply an extra 0.98/0.02 smoothing pass. Both are removed - see
+# spread_model.py and README "Known limitations / methodology changes".
+# The line above tells you, with real numbers from THIS run, how often the
+# unclipped filter actually left that historically-plausible range.
 
 # =====================================================
 # 2.5. HYPOTHESIS TEST: is the traded spread actually mean-reverting?
 # =====================================================
-# The whole strategy assumes the spread is stationary (i.e. it reverts to a
-# local mean instead of drifting freely). This is the direct check on the
-# actual object being traded, not on some other proxy spread.
 adf_result = adfuller(df["spread"].dropna())
 adf_pvalue = adf_result[1]
-print(f"ADF test on the traded spread: p-value = {adf_pvalue:.4f}")
+print(f"\nADF test on the traded spread: p-value = {adf_pvalue:.4f}")
 print(f"Stationary (p<0.05): {adf_pvalue < 0.05}")
 
 # =====================================================
-# 3. SIGNAL: Z-SCORE OF THE SPREAD
+# 2.6. OU HALF-LIFE: data-derived justification for the z-score window
 # =====================================================
-window = 30
-
-# mean/std use .shift(1) so today's z-score never uses today's own value -
-# avoids look-ahead bias
-mean = df["spread"].rolling(window).mean().shift(1)
-std = df["spread"].rolling(window).std().shift(1)
-
-df["z"] = (df["spread"] - mean) / (std + 1e-12)
-
-# =====================================================
-# 4. REGIME FILTER: only trade when the spread itself is calm
-# =====================================================
-# Mean-reversion signals are less reliable when the spread is unusually
-# volatile (e.g. during a real structural break). This restricts trading to
-# periods where recent spread volatility is below its own historical 70th
-# percentile. Uses .shift(1) so the regime label is known before the day starts.
-ret = df["spread"].diff()
-vol = ret.rolling(20).std()
-df["mr_regime"] = (vol < vol.rolling(100).quantile(0.7)).shift(1).fillna(0)
+ou = val.estimate_ou_half_life(df["spread"])
+print("\n=== OU MEAN-REVERSION HALF-LIFE ===")
+if ou.get("half_life_days") is None:
+    print(f"No usable half-life estimate: {ou.get('note')}")
+    print(f"Falling back to the configured z_window={config.z_window} "
+          f"(not data-derived on this run).")
+else:
+    print(f"theta={ou['theta']:.5f} (p={ou['theta_pvalue']:.4f}), "
+          f"half-life={ou['half_life_days']:.1f} days, "
+          f"significant at 5%: {ou['mean_reverting']}")
+    print(f"Suggested window (1.5x-2x half-life): "
+          f"{ou['suggested_window_1_5x_half_life']}-{ou['suggested_window_2x_half_life']} days "
+          f"vs. configured z_window={config.z_window}")
+    if ou.get("note"):
+        print(f"Caveat: {ou['note']}")
 
 # =====================================================
-# 5. RISK SCALING: target a constant portfolio volatility
+# 3. SIGNAL: Z-SCORE OF THE SPREAD (spread_model.py)
 # =====================================================
-# Estimates the variance of the hedged Brent-vs-beta*WTI portfolio itself
-# (not just each leg individually), then sizes the position so the expected
-# annualized volatility stays near a fixed target (10%), shrinking size when
-# markets get choppy and growing it when things are calm.
-ret_b = np.log(df["Brent"]).diff()
-ret_w = np.log(df["WTI"]).diff()
-
-var_b = ret_b.ewm(span=30).var()
-var_w = ret_w.ewm(span=30).var()
-cov = ret_b.ewm(span=30).cov(ret_w)
-
-portfolio_var = (
-        var_b
-        + (df["beta"] ** 2) * var_w
-        - 2 * df["beta"] * cov
-)
-
-portfolio_vol = np.sqrt(np.clip(portfolio_var, 1e-12, None)) * np.sqrt(252)
-
-TARGET_ANNUAL_VOL = 0.10  # arbitrary target: 10% annualized portfolio volatility
-df["risk_scale"] = (TARGET_ANNUAL_VOL / (portfolio_vol + 1e-12)).shift(1)
-df["risk_scale"] = df["risk_scale"].clip(0.1, 2.0).fillna(1.0)  # cap leverage between 0.1x and 2x
+df = sm.compute_zscore(df, config)
 
 # =====================================================
-# 6. ENTRY/EXIT LOGIC WITH HYSTERESIS
+# 4. REGIME FILTER: only trade when the spread itself is calm (spread_model.py)
 # =====================================================
-# Different thresholds for entering (1.8) vs exiting (0.3) a position, so the
-# strategy doesn't flip in and out every time z hovers near zero.
-# pos = +1 means: long the spread (implicitly: long Brent-leg, short beta*WTI-leg)
-# pos = -1 means: the opposite. This sign convention only exists implicitly,
-# baked into the PnL formula in section 7 - there is no explicit order logic here.
-entry, exit = 1.8, 0.3
+df = sm.compute_regime_filter(df, config)
 
-pos = 0.0
-positions = np.zeros(n)
+# =====================================================
+# 5. RISK SCALING: target a constant portfolio volatility (spread_model.py)
+# =====================================================
+df = sm.compute_risk_scale(df, config)
 
-for i in range(n):
-    z = df["z"].iloc[i]
-    mr = df["mr_regime"].iloc[i]
-
-    if pos == 0:
-        if mr:
-            if z > entry:
-                pos = -1
-            elif z < -entry:
-                pos = 1
-    else:
-        if pos == -1 and z < exit:
-            pos = 0
-        elif pos == 1 and z > -exit:
-            pos = 0
-
-    positions[i] = pos
-
+# =====================================================
+# 6. ENTRY/EXIT LOGIC WITH HYSTERESIS (spread_model.py, numba core)
+# =====================================================
+positions = sm.compute_positions(df, config.entry_threshold, config.exit_threshold)
 df["position"] = positions * df["risk_scale"]
 
 # =====================================================
-# 7. PnL: hedged log-return of the pair, minus trading costs
+# 7. PnL + 8. PERFORMANCE METRICS (spread_model.compute_performance)
 # =====================================================
-dB = np.log(df["Brent"]).diff()
-dW = np.log(df["WTI"]).diff()
-
-# use yesterday's position and beta to compute today's return -
-# today's own position/beta must never be used, or this leaks future info
-pos_lag = df["position"].shift(1)
-beta_lag = df["beta"].shift(1)
-
-# normalizes the return by total gross exposure (1 unit WTI leg + beta units
-# Brent leg), so a bigger beta doesn't mechanically inflate the return
-gross = 1.0 + np.abs(beta_lag)
-
-strategy_log_ret = pos_lag * (dB - beta_lag * dW) / gross
-
-# cost charged whenever position size changes (proxy for bid-ask spread /
-# commissions); this is a flat assumption, not derived from real quotes
-turnover = df["position"].diff().abs()
-cost = 0.0005
-
-df["net_log_ret"] = strategy_log_ret - turnover * cost
-
-# cumulative equity curve, built in log-return space for numerical stability
+perf = sm.compute_performance(df, df["position"], config.cost_per_turnover)
+df["net_log_ret"] = perf["net_log_ret"]
+# full-length equity curve for plotting (treats the pre-warmup NaN period as
+# flat at 1.0, same convention as before - compute_performance's own equity
+# series is only over valid rows, which is what feeds the metrics below)
 df["equity"] = np.exp(df["net_log_ret"].fillna(0).cumsum())
 
-# =====================================================
-# 8. PERFORMANCE METRICS
-# =====================================================
-df = df.dropna()
+sharpe, sortino, dd = perf["sharpe"], perf["sortino"], perf["max_dd"]
 
-r = np.exp(df["net_log_ret"]) - 1
-
-sharpe = (r.mean() / (r.std() + 1e-12)) * np.sqrt(252)
-
-down = r[r < 0]
-sortino = (r.mean() / (down.std() + 1e-12)) * np.sqrt(252)
-
-dd = (df["equity"] / df["equity"].cummax() - 1).min()
-
-print("=== BACKTEST RESULTS ===")
+print(f"\n=== BACKTEST RESULTS (base cost = {config.cost_per_turnover*10000:.1f} bps) ===")
 print(f"Sharpe:  {sharpe:.3f}")
 print(f"Sortino: {sortino:.3f}")
 print(f"Max DD:  {dd*100:.2f}%")
+print(f"Trades:  {perf['n_trades']}")
+
+df_valid = df.dropna(subset=["net_log_ret"])
+r = np.exp(df_valid["net_log_ret"]) - 1
 
 # =====================================================
-# 8.5. WALK-FORWARD: is the result stable across sub-periods,
-# or is it driven by one lucky window?
+# 8.5. WALK-FORWARD: development / validation / final-test sub-periods
 # =====================================================
+# Labeled explicitly (not just "sub-period 1/2/3") because that labeling is
+# the point: 2019-2021 is where thresholds may be inspected and reasoned
+# about; 2024-2026 is meant to be looked at once, honestly, and not tuned
+# against afterward. See README "Known limitations" for what this framing
+# does and does not yet guarantee (it is NOT yet a re-fit-per-period
+# out-of-sample test - that's a planned follow-up, not implemented here).
 splits = {
-    "2019-2021": df["2019":"2021"],
-    "2022-2023": df["2022":"2023"],
-    "2024-2026": df["2024":"2026"],
+    "2019-2021 (development)": ("2019", "2021"),
+    "2022-2023 (validation)": ("2022", "2023"),
+    "2024-2026 (final test - do not tune against this)": ("2024", "2026"),
 }
 
 print("\n=== WALK-FORWARD BY SUB-PERIOD ===")
-for name, sub in splits.items():
+for name, (start, end) in splits.items():
+    sub = df[start:end]
     if len(sub) < 30:
         print(f"{name}: not enough data ({len(sub)} days)")
         continue
-    r_sub = np.exp(sub["net_log_ret"]) - 1
-    sharpe_sub = (r_sub.mean() / (r_sub.std() + 1e-12)) * np.sqrt(252)
-    dd_sub = (sub["equity"] / sub["equity"].cummax() - 1).min()
-    print(f"{name}: Sharpe={sharpe_sub:.3f}, MaxDD={dd_sub*100:.2f}%, N={len(sub)}")
+    sub_perf = sm.compute_performance(sub, sub["position"], config.cost_per_turnover)
+    print(f"{name}: Sharpe={sub_perf['sharpe']:.3f}, MaxDD={sub_perf['max_dd']*100:.2f}%, N={len(sub)}")
 
-print(f"Worst single day: {r.min()*100:.2f}%")
+print(f"\nWorst single day: {r.min()*100:.2f}%")
 print(f"Best single day:  {r.max()*100:.2f}%")
 print(f"Median leverage (risk_scale): {df['risk_scale'].median():.2f}")
 print(f"Max leverage (risk_scale):    {df['risk_scale'].max():.2f}")
 print(f"Realized annualized volatility: {r.std()*np.sqrt(252)*100:.2f}%")
+
+# =====================================================
+# 8.6. PARAMETER SENSITIVITY SWEEP - DEVELOPMENT PERIOD ONLY
+# =====================================================
+# Only ever run on 2019-2021. Running this on validation/final-test data and
+# picking whichever thresholds score best there would turn this diagnostic
+# into exactly the in-sample parameter search it exists to catch.
+print("\n=== PARAMETER SENSITIVITY: entry/exit grid, 2019-2021 (development) ONLY ===")
+dev_df = df["2019":"2021"]
+sensitivity = val.run_parameter_sensitivity(dev_df, config)
+print(sensitivity.to_string(index=False))
+print(val.summarize_sensitivity(sensitivity, config.entry_threshold, config.exit_threshold))
+
+# =====================================================
+# 8.7. TRANSACTION COST STRESS TEST
+# =====================================================
+print("\n=== TRANSACTION COST STRESS TEST (full history) ===")
+stress = ct.run_cost_stress_test(df)
+print(stress.to_string(index=False))
+print(ct.summarize_cost_stress(stress, config.cost_per_turnover * 10000))
 
 # =====================================================
 # 9. EQUITY CURVE
@@ -263,6 +206,19 @@ plt.show()
 # 10. SUMMARY: what to check before trusting this backtest
 # =====================================================
 print("\n=== HOW MUCH TO TRUST THIS BACKTEST ===")
-print(f"1. Traded spread is stationary (ADF p<0.05): {adf_pvalue < 0.05} (p={adf_pvalue:.4f})")
-print(f"2. Sharpe stable across sub-periods: see 'WALK-FORWARD' output above")
-print(f"   -> compare manually whether the result depends on one specific window")
+print(f"1. Traded spread is stationary over full history (ADF p<0.05): "
+      f"{adf_pvalue < 0.05} (p={adf_pvalue:.4f})")
+print(f"2. Mean-reversion half-life is statistically significant: "
+      f"{ou.get('mean_reverting', 'N/A')}")
+print(f"3. Sharpe stable across development/validation/final-test: see "
+      f"'WALK-FORWARD' output above - compare manually whether the result "
+      f"depends on one specific window")
+print(f"4. Sharpe not concentrated in one specific (entry, exit) pair "
+      f"(development period only): see 'PARAMETER SENSITIVITY' above")
+print(f"5. Sharpe survives higher assumed transaction costs: see "
+      f"'TRANSACTION COST STRESS TEST' above")
+print(f"6. Kalman beta stayed within its historically-plausible band: "
+      f"{kalman_diag.pct_out_of_band:.2%} of days out-of-band (diagnostic, "
+      f"not enforced - see point 2 above)")
+print("7. NOT modeled: futures contract roll mechanics (CL=F/BZ=F are "
+      "continuous series) - see README 'Known limitations'.")

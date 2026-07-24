@@ -79,6 +79,20 @@ class StrategyConfig:
     # -------------------------------------------------
     cost_per_turnover: float = 0.0005
 
+    # -------------------------------------------------
+    # Futures roll drag (stylized approximation)
+    # -------------------------------------------------
+    # CL=F/BZ=F from yfinance are continuous front-month series with no
+    # per-contract curve data behind them, so this project cannot compute
+    # an actual roll yield from real contango/backwardation. This is a
+    # single annualized drag figure applied only while a position is
+    # held (see roll_costs.py), in the same rough order of magnitude as
+    # commonly-cited WTI/Brent calendar-roll costs. It is NOT a
+    # contract-by-contract roll simulation and should be read as a
+    # sensitivity check ("how much of the edge survives if roll cost eats
+    # this many bps/year"), not a precise estimate of real roll cost.
+    roll_drag_annual_bps: float = 25.0
+
     def to_dict(self) -> dict:
         return asdict(self)
 

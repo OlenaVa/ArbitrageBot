@@ -8,19 +8,29 @@ def run_monte_carlo_analysis(days_ahead=10, simulations=10000, volatility=None, 
     Runs a Monte Carlo simulation for WTI price 10 days ahead, based on
     current market data. Returns the forecasted low/median/high price range.
 
+    Naming note: this module reports `brent_wti_diff_usd`, the plain
+    dollar difference between the two benchmarks on the latest available
+    day. This is deliberately NOT called "spread" here - that word is
+    reserved elsewhere in this repo (main.py, market_check.py,
+    spread_model.py) for the Kalman-hedge-ratio log-residual
+    (y - beta*x), a different quantity computed a different way. Reusing
+    "spread" for this plain difference was a past source of confusion
+    when reading the two modules side by side; the field is renamed to
+    make that distinction explicit rather than documented-but-ambiguous.
+
     volatility=None -> computed from the last 30 days of real WTI returns
     instead of a hardcoded number.
     seed=None -> every run gives a different result (a fixed seed would
     defeat the purpose of a Monte Carlo simulation).
     """
-    # 1. Load recent data. period="3d" can fail on weekends/holidays when
-    # markets are closed - "3d"/"30d" always has at least one valid recent row.
+    # 1. Load recent data. period="30d"/"3d" always has at least one valid
+    # recent row even across weekends/holidays when markets are closed.
     wti_hist = yf.Ticker("CL=F").history(period="30d")['Close']
     brent_hist = yf.Ticker("BZ=F").history(period="3d")['Close']
 
     current_price = wti_hist.iloc[-1]
     brent = brent_hist.iloc[-1]
-    spread = brent - current_price
+    brent_wti_diff_usd = brent - current_price
 
     # 2. Volatility: estimated from real recent WTI returns rather than a
     # hardcoded constant, so the simulation reflects current market conditions
@@ -51,7 +61,7 @@ def run_monte_carlo_analysis(days_ahead=10, simulations=10000, volatility=None, 
     return {
         "current_price": current_price,
         "brent": brent,
-        "spread": spread,
+        "brent_wti_diff_usd": brent_wti_diff_usd,
         "volatility_used": volatility,
         "days_ahead": days_ahead,
         "p50": p50,
@@ -72,7 +82,7 @@ def plot_analysis(results):
                 label=f'Brent (${results["brent"]:.2f})')
 
     plt.title(f"WTI {days_ahead}-Day Forecast (vol: {results['volatility_used']*100:.1f}%/yr, "
-              f"current WTI-Brent spread: ${results['spread']:.2f})")
+              f"current WTI-Brent $ difference: ${results['brent_wti_diff_usd']:.2f})")
     plt.ylabel("Price (USD/bbl)")
     plt.xlabel("Days Ahead")
     plt.legend()
@@ -85,6 +95,8 @@ if __name__ == "__main__":
 
     day = data["days_ahead"]
     print(f"Current WTI: ${data['current_price']:.2f}, Brent: ${data['brent']:.2f}")
+    print(f"WTI-Brent $ difference (NOT the Kalman-hedge spread used in main.py): "
+          f"${data['brent_wti_diff_usd']:.2f}")
     print(f"Volatility used: {data['volatility_used']*100:.1f}%/yr (from last 30 days of real returns)")
     print(f"\n=== WTI PRICE FORECAST, {day} DAYS AHEAD ===")
     print(f"Low  (5th percentile):  ${data['p5'][-1]:.2f}")

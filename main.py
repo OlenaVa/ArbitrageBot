@@ -1,4 +1,3 @@
-
 """
 main.py - full Brent/WTI stat-arb backtest.
 
@@ -30,6 +29,7 @@ from config import StrategyConfig
 import spread_model as sm
 import validation as val
 import costs as ct
+import roll_costs as rc
 
 config = StrategyConfig()
 
@@ -194,6 +194,16 @@ print(stress.to_string(index=False))
 print(ct.summarize_cost_stress(stress, config.cost_per_turnover * 10000))
 
 # =====================================================
+# 8.8. FUTURES ROLL-DRAG SENSITIVITY CHECK (stylized approximation)
+# =====================================================
+# CL=F/BZ=F have no per-contract curve data behind them, so this is NOT a
+# real roll simulation - it is a "how much of the edge survives a plausible
+# roll-cost drag" sensitivity check. See roll_costs.py and README "Known
+# limitations" for exactly what this does and does not establish.
+print("\n=== FUTURES ROLL-DRAG SENSITIVITY (stylized, full history) ===")
+print(rc.summarize_roll_drag(df, "position", config.cost_per_turnover, config.roll_drag_annual_bps))
+
+# =====================================================
 # 9. EQUITY CURVE
 # =====================================================
 plt.figure(figsize=(12, 5))
@@ -220,5 +230,9 @@ print(f"5. Sharpe survives higher assumed transaction costs: see "
 print(f"6. Kalman beta stayed within its historically-plausible band: "
       f"{kalman_diag.pct_out_of_band:.2%} of days out-of-band (diagnostic, "
       f"not enforced - see point 2 above)")
-print("7. NOT modeled: futures contract roll mechanics (CL=F/BZ=F are "
-      "continuous series) - see README 'Known limitations'.")
+print(f"7. Sharpe survives a stylized futures roll-drag assumption "
+      f"({config.roll_drag_annual_bps:.0f} bps/yr): see 'FUTURES ROLL-DRAG "
+      f"SENSITIVITY' above. NOTE: this is a sensitivity check against an "
+      f"assumed drag figure, NOT a real per-contract roll simulation - "
+      f"CL=F/BZ=F are continuous series with no curve data behind them. "
+      f"See README 'Known limitations'.")

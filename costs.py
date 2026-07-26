@@ -55,7 +55,7 @@ def run_cost_stress_test(df: pd.DataFrame, position_col: str = "position") -> pd
             "scenario": label,
             "cost_bps": bps,
             "sharpe": perf["sharpe"],
-            "max_dd_pct": perf["max_dd"] * 100 if perf["max_dd"] == perf["max_dd"] else float("nan"),
+            "max_dd_pct": perf["max_dd"] * 100 if not pd.isna(perf["max_dd"]) else float("nan"),
             "n_trades": perf["n_trades"],
         })
     return pd.DataFrame(rows)

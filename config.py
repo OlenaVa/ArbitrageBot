@@ -25,7 +25,17 @@ FROZEN_DATE = "2026-07-22"
 OOS_PERIODS: Dict[str, Tuple[str, str]] = {
     "development_2019_2021": ("2019-01-01", "2021-12-31"),
     "validation_2022_2023": ("2022-01-01", "2023-12-31"),
-    "final_test_2024_2026": ("2024-01-01", "2026-12-31"),
+    # End date is FROZEN_DATE, not "2026-12-31": the target window is
+    # 2024-2026, but 2026-12-31 hasn't happened yet, so leaving the raw
+    # future date here would make this period's end boundary "today"
+    # every time oos_evaluation.py is rerun - meaning the reported
+    # Sharpe/Sortino/return for final-test would silently drift on every
+    # rerun, even ones done for an unrelated code change. Anchoring it to
+    # FROZEN_DATE instead makes the reported number reproducible: it only
+    # moves when someone deliberately edits FROZEN_DATE forward (e.g.
+    # before citing a fresh number), which is a conscious, dated action
+    # instead of an accidental side effect.
+    "final_test_2024_2026": ("2024-01-01", FROZEN_DATE),
 }
 
 

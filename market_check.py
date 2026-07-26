@@ -23,7 +23,7 @@ def load_recent_data(days=250):
     Loads enough history to compute a stable Kalman beta and a rolling ADF
     test, without re-running the full 2019-present backtest.
     """
-    raw = yf.download(["CL=F", "BZ=F"], period=f"{days}d", progress=False)
+    raw = yf.download(["CL=F", "BZ=F"], period=f"{days}d", progress=False, auto_adjust=False)
 
     if isinstance(raw.columns, pd.MultiIndex):
         raw = raw.xs("Close", axis=1, level=0)
@@ -57,6 +57,7 @@ def check_market_health(days=250, rolling_adf_window=90, config: StrategyConfig 
     df, kalman_diag = sm.compute_beta_and_spread(df, config)
     df = sm.compute_zscore(df, config)
     df = sm.compute_regime_filter(df, config)
+    df = sm.compute_risk_scale(df, config)
 
     # rolling ADF: is the spread stationary on a recent window, not just
     # over the multi-year backtest - this is the actual "trade now?" check
@@ -79,6 +80,7 @@ def check_market_health(days=250, rolling_adf_window=90, config: StrategyConfig 
         "spread": df["spread"].iloc[-1],
         "z": df["z"].iloc[-1],
         "mr_regime": bool(df["mr_regime"].iloc[-1]),
+        "risk_scale": df["risk_scale"].iloc[-1],
         "rolling_adf_pvalue": df["rolling_adf_pvalue"].iloc[-1],
         "locally_stationary": df["rolling_adf_pvalue"].iloc[-1] < 0.05,
         "kalman_diagnostics": kalman_diag,
@@ -111,17 +113,23 @@ def describe_trade_action(health, capital_usd=100_000, config: StrategyConfig = 
     else:
         brent_side, wti_side = "BUY (long)", "SELL (short)"
 
-    # Position sizing: rough approximation of main.py's risk_scale idea
-    # (target vol / portfolio vol), using capital and a fixed fraction since
-    # the full EWMA portfolio-variance model isn't recomputed in this
-    # lightweight check. Treat this as a starting point, not a precise
-    # sizing model.
-    notional = capital_usd * target_annual_vol
+    # Position sizing: reuses the SAME risk_scale that check_market_health
+    # already computed via spread_model.compute_risk_scale (identical EWMA
+    # portfolio-variance vol-targeting to main.py's backtest), instead of a
+    # flat capital fraction. target_annual_vol is the notional-to-capital
+    # ratio at risk_scale == 1.0 (i.e. when current realized vol sits
+    # exactly at target); risk_scale scales that baseline up or down
+    # depending on whether today's vol is below or above target - same
+    # relationship as `position = raw_signal * risk_scale` in main.py.
+    # Still a research signal check, not a decision-grade sizing model -
+    # see "Known limitations" (no contract specs, margin, or staleness
+    # checks here).
+    notional = capital_usd * target_annual_vol * health["risk_scale"]
     wti_contracts = notional / (wti_price * CONTRACT_SIZE)
     brent_contracts = wti_contracts * beta
 
     if round(wti_contracts) == 0:
-        min_capital = wti_price * CONTRACT_SIZE / target_annual_vol
+        min_capital = wti_price * CONTRACT_SIZE / (target_annual_vol * health["risk_scale"])
         return {
             "error": f"Computed size ({wti_contracts:.3f} contracts) is below 1 - "
                      f"with capital ${capital_usd:,} this strategy cannot be executed "
@@ -146,6 +154,7 @@ if __name__ == "__main__":
         print(f"Spread (log): {health['spread']:.4f}")
         print(f"Z-score: {health['z']:.2f}")
         print(f"Regime (calm market): {health['mr_regime']}")
+        print(f"Risk scale (vol-target leverage): {health['risk_scale']:.2f}")
         print(f"Rolling ADF p-value (90d): {health['rolling_adf_pvalue']:.4f}")
         print(f"Locally stationary: {health['locally_stationary']}")
 

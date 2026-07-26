@@ -103,7 +103,7 @@ def _kalman_core(x_arr, y_arr, brent_pct, beta_init, p_init, q, r, q_vol_mult, r
         x = x_arr[t]
         y = y_arr[t]
         bp = brent_pct[t]
-        vol = abs(bp) if (t > 1 and not np.isnan(bp)) else 0.0
+        vol = abs(bp) if not np.isnan(bp) else 0.0
 
         q_t = q * (1.0 + q_vol_mult * vol)
         r_t = r * (1.0 + r_vol_mult * vol)
@@ -203,7 +203,7 @@ def compute_regime_filter(df: pd.DataFrame, config: StrategyConfig) -> pd.DataFr
     ret = df["spread"].diff()
     vol = ret.rolling(config.regime_vol_window).std()
     threshold = vol.rolling(config.regime_lookback).quantile(config.regime_quantile)
-    df["mr_regime"] = (vol < threshold).shift(1).fillna(0)
+    df["mr_regime"] = (vol < threshold).shift(1).fillna(False).astype(bool)
     return df
 
 

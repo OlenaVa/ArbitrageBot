@@ -4,12 +4,19 @@ A research backtest of a Brent/WTI crude oil statistical arbitrage strategy: a v
 
 **What this is not:** there is no order execution, broker connection, or live capital involved anywhere in this repo. Everything here is a historical backtest and a set of diagnostic tools — treat the results as a research exercise, not a performance guarantee. `market_check.py`'s contract-count suggestion is a research signal check, not a trade-ready instruction: it does not verify contract specifications, exact multipliers, currency, margin requirements, or data staleness before suggesting a size — see "Known limitations". It also does not model futures contract roll mechanics (see "Known limitations" below) — `CL=F`/`BZ=F` are continuous front-month series, not a single tradable instrument.
 
+## At a glance
+
+* Brent–WTI statistical arbitrage backtest: a volatility-adaptive Kalman-filtered dynamic hedge ratio, a regime-gated mean-reversion signal, and volatility-targeted position sizing.
+* Frozen-parameter, walk-forward out-of-sample evaluation across three periods (2019–2026): Sharpe of `1.01`, `1.07`, and `1.21` net of transaction costs for development, validation, and final-test respectively (see "Results" for the full table).
+* No order execution, broker connection, or live capital anywhere in this repo — see "What this is not" directly below for what that does and doesn't mean.
+* "Results" and "OOS evaluation: a bug found and fixed" are the two sections with the most substance, if you're reading selectively.
+
 ## Contents
 
 | File                       | What it does                                                                                                                                                                                                                                                                   |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `main.py`                  | Full-history backtest: data loading, Kalman hedge ratio, ADF stationarity test, OU half-life, z-score signal, regime filter, risk scaling, PnL, walk-forward check, parameter sensitivity sweep, cost stress test, roll-drag sensitivity, equity curve                         |
-| `market_check.py`          | "Should we trade right now?" — recomputes the same beta/spread on recent data (via `spread_model.py`) and, if there's a signal, translates it into concrete WTI/Brent futures contract counts. A research signal check, not a trade-ready instruction — see "What this is not" |
+| `market_check.py`          | "Should we trade right now?" — recomputes the same beta/spread/risk-scale on recent data (via `spread_model.py`) and, if there's a signal, translates it into concrete WTI/Brent futures contract counts sized by the same vol-targeting logic as the backtest. A research signal check, not a trade-ready instruction — see "What this is not" |
 | `monte_carlo_engine.py`    | Standalone 10-day GBM Monte Carlo forecast for WTI, independent of the stat-arb signal                                                                                                                                                                                         |
 | `config.py`                | Single, frozen source of truth for every tunable constant (`StrategyConfig`) and the three OOS period boundaries                                                                                                                                                               |
 | `spread_model.py`          | Shared model logic: Kalman hedge ratio, z-score, regime filter, risk scaling, position logic, and performance metrics — imported identically by every script below, so none of them can silently disagree about what "the spread" is                                           |
@@ -18,6 +25,7 @@ A research backtest of a Brent/WTI crude oil statistical arbitrage strategy: a v
 | `roll_costs.py`            | Stylized futures roll-cost drag sensitivity check — applies a configurable annualized bps drag while a position is held and reports Sharpe with/without it. Not a real per-contract roll simulation (`CL=F`/`BZ=F` have no curve data behind them); see "Known limitations"    |
 | `oos_evaluation.py`        | Frozen-parameter evaluation across development / validation / final-test periods. See "OOS evaluation: a bug found and fixed" below before trusting any earlier version of this file's output                                                                                  |
 | `parameter_sensitivity.py` | Standalone entry/exit sensitivity sweep on real downloaded data, development period only                                                                                                                                                                                       |
+| `generate_report_charts.py` | Reads the committed `results/*.csv` and writes the PNG charts embedded below to `results/charts/` — no network access, just plotting. Rerun after `oos_evaluation.py` to keep the images in sync with the numbers                                                             |
 
 ## Methodology
 
@@ -35,7 +43,7 @@ Every signal input — z-score, regime label, risk scale, and the position itsel
 
 * ADF stationarity test on the traded spread.
 * OU half-life estimate, cross-checking the configured z-score window (diagnostic, computed on the same data the strategy trades — see Methodology).
-* Frozen-parameter OOS evaluation across development (2019–2021), validation (2022–2023) and final-test (2024–2026 target window — see the note on this label under "Results") — see `oos_evaluation.py` and the dedicated section below.
+* Frozen-parameter OOS evaluation across development (2019–2021), validation (2022–2023) and final-test (2024–`FROZEN_DATE` — see the note on this label under "OOS evaluation: a bug found and fixed") — see `oos_evaluation.py` and the dedicated section below.
 * Parameter sensitivity sweep over entry/exit thresholds, run only on the development slice. This checks robustness to that specific pair of parameters — it does not sweep the Kalman noise terms, regime thresholds, or risk target, so "robust to parameter choice" should be read as scoped to entry/exit, not the model as a whole.
 * Transaction cost stress test at low/base/stress bps scenarios, reusing the exact position path from the primary run.
 * Futures roll-drag sensitivity check (stylized annualized bps assumption — see `roll_costs.py`).
@@ -68,9 +76,11 @@ Approach (2) does recompute some history redundantly — development gets recomp
 
 Why this is documented here instead of quietly corrected: the reset version wasn't a different, equally-valid test condition — it measured a different and unrealistic strategy that forgets three years of tracked history on an arbitrary calendar boundary, and it understated validation Sharpe by approximately `0.41` as a direct result. Calling that "different test conditions" would be shading the truth; calling it a bug that was caught, quantified, and fixed is both more accurate and a stronger thing to be able to say out loud.
 
-A note on the "final test 2024–2026" label, and the two different Sharpe numbers for it in this README (`1.212` above vs. `1.181` in "Results" below): **2024–2026 is a configured target window, not a claim that the period has already finished.** As of any given run, Yahoo Finance can only return data through the latest available trading day. In practice, "final test 2024–2026" means "2024-01-01 through whatever the latest trading day was when `oos_evaluation.py` was run," not a completed three-year window, until `2026-12-31` actually passes.
+A note on the "final test" label, and why this README used to carry more than one number for it: **2024–2026 was originally a configured target window with an open "today" end boundary, not a claim that the period had already finished** — Yahoo Finance can only return data through the latest available trading day, so every rerun before the fix described below would pull in a few more days and shift the final-test figure slightly.
 
-That is also why the two numbers differ and aren't a typo: development (1.009) and validation (1.070) agree exactly between the two tables because those are closed historical windows that cannot change between runs. Final-test is the one period whose end boundary is "today" — every additional trading day of real data pulled in by a later run can shift it slightly. The two tables above were generated on different days. Treat the "Results" section below as the current number; the `1.212` in the bug-impact table is only meant to demonstrate the size of the fix, not to stand as the latest headline figure — and neither should be read as a final, complete-period result until the window has actually closed.
+That's why development (`1.009`) and validation (`1.070`) always agreed exactly between any two tables in this README — closed historical windows can't change between runs — while final-test did not: the bug-impact table above (`1.212`), an earlier version of the "Results" table (`1.181`), and the committed `results/oos_daily_returns.csv`/`oos_results.csv` at one point (`1.325`) were three numbers from three different run dates. None of them was wrong; they described three different amounts of accumulated data. Treating any single one as "the" final-test number without a date attached would have been misleading no matter which was picked, and it's exactly the kind of inconsistency a careful reader would (rightly) flag — because that's what happened here.
+
+That's now fixed at the source instead of managed with more caveats: `config.OOS_PERIODS`'s final-test end date is pinned to `FROZEN_DATE` instead of the still-future `2026-12-31` (which is what made every run's effective end boundary "today"). Now that "Results" below has been regenerated after this change, that figure should stay put on unrelated reruns — it will only change when `FROZEN_DATE` itself is deliberately moved forward, which is a conscious, dated decision rather than a side effect of rerunning something unrelated. The `1.212` above stays as a record of the bug's measured size on one specific historical run, not a number to cite going forward.
 
 ## Setup
 
@@ -86,6 +96,7 @@ python market_check.py          # is there a signal right now? + suggested contr
 python monte_carlo_engine.py    # 10-day WTI price forecast
 python oos_evaluation.py        # frozen-parameter OOS evaluation -> results/oos_*.csv
 python parameter_sensitivity.py # entry/exit sensitivity on real data (development period)
+python generate_report_charts.py # results/*.csv -> results/charts/*.png (no network needed)
 ```
 
 `config.py`, `spread_model.py`, `validation.py`, `costs.py`, and `roll_costs.py` are not meant to be run directly — they're imported by the scripts above.
@@ -143,23 +154,31 @@ None of these were fit by optimizing the backtest's own Sharpe ratio — they're
 
 ## Results
 
-Frozen config version `frozen_step_1_v1`, frozen `2026-07-22`. From `oos_evaluation.py`'s corrected causal expanding-history computation, live run:
+Frozen config version `frozen_step_1_v1`, frozen `2026-07-22`. From `oos_evaluation.py`'s corrected causal expanding-history computation:
 
-| Period                | Return | Sharpe | Sortino | Max DD | Trades |
-| --------------------- | ------ | ------ | ------- | ------ | ------ |
-| Development 2019–2021 | 9.77%  | 1.009  | 1.198   | -2.61% | 206    |
-| Validation 2022–2023  | 7.79%  | 1.070  | 1.385   | -3.37% | 187    |
-| Final test 2024–2026* | 12.29% | 1.181  | 0.886   | -3.10% | 195    |
+| Period                                  | Return  | Sharpe | Sortino | Max DD | Trades |
+| ---------------------------------------- | ------- | ------ | ------- | ------ | ------ |
+| Development 2019–2021                    | 9.77%   | 1.009  | 1.198   | -2.61% | 206    |
+| Validation 2022–2023                     | 7.79%   | 1.070  | 1.385   | -3.37% | 187    |
+| Final test 2024–2026 (frozen `2026-07-22`) | 12.56%  | 1.207  | 0.901   | -3.10% | 194    |
 
-* `2024–2026` is a configured target window. These figures reflect data through the latest run date, not a completed 2024–2026 window.
+Final-test's window is now frozen to `config.FROZEN_DATE` rather than "today" (see "OOS evaluation" above for why) — this row was regenerated once after that change and should now stay put on unrelated reruns, moving only if `FROZEN_DATE` itself is deliberately edited forward.
 
-Beta stayed inside the `[0.5, 2.0]` diagnostic band on 100% of days in every period (no warnings raised).
+Visual diagnostics, generated directly from the CSVs above via `generate_report_charts.py` (not live-rendered for this README, so refresh them the same way after any future data update):
 
-Worth flagging rather than glossing over: final-test Sortino (`0.886`) is lower than its own Sharpe (`1.181`), unlike development and validation where Sortino exceeds Sharpe as usual. That means downside deviation is proportionally larger relative to mean return in final-test than in the other two periods — i.e. this period's losing days are relatively more severe/asymmetric, even though headline risk-adjusted return is still the best of the three. Not a red flag on its own, but a reason to look at the drawdown shape in final-test specifically before citing this number without qualification.
+![Equity and drawdown for each OOS period, independently reset to 1.0 at the start of each](results/charts/oos_equity_drawdown.png)
+
+Beta stayed inside the `[0.5, 2.0]` diagnostic band on 100% of days in every period (no warnings raised):
+
+![Kalman hedge ratio (beta) over the full 2019-2026 history](results/charts/beta_over_time.png)
+
+![Kalman spread and z-score, full history, with the configured entry/exit bands](results/charts/spread_zscore.png)
+
+Worth flagging rather than glossing over: final-test Sortino (`0.901`) is lower than its own Sharpe (`1.207`), unlike development and validation, where Sortino exceeds Sharpe as usual. That means downside deviation is proportionally larger relative to mean return in final-test than in the other two periods — this period's losing days are relatively more severe/asymmetric, even though headline risk-adjusted return is still the best of the three. Not a red flag on its own, but a reason to look at the drawdown shape in final-test specifically before citing this number without qualification.
 
 **Parameter sensitivity (development period, real data):** configured `(1.8, 0.3)` Sharpe = `1.009`; the tested grid ranged from `0.702` to `1.472`, and all tested combinations produced positive Sharpe. The best grid point (`entry=2.0`, `exit=0.4`, Sharpe=`1.47`) is not the configured pair. This shows that the configured thresholds are not simply the in-sample maximum of this tested entry/exit grid. It does **not**, by itself, prove that the thresholds were chosen without prior exposure to the development results, or that other model parameters were not selected using the data.
 
-Still to fill in: block bootstrap CI on Sharpe (planned); equity curve screenshot.
+Still to fill in: block bootstrap CI on Sharpe (planned).
 
 ## Resolved in this version
 
@@ -176,6 +195,17 @@ Still to fill in: block bootstrap CI on Sharpe (planned); equity curve screensho
 * "Spread" meant two different things across files (Kalman log-residual vs. plain dollar difference) → `monte_carlo_engine.py`'s field renamed to `brent_wti_diff_usd` to make the distinction explicit instead of documented-but-ambiguous.
 * Added `roll_costs.py`: futures roll-drag sensitivity check, previously the single largest unmodeled gap with no mitigation at all.
 * Terminology precision pass: Kalman filter explicitly labeled volatility-adaptive rather than implying textbook constant-Q/R behavior; ADF-on-dynamic-spread distinguished from classical fixed-coefficient cointegration testing; OU half-life labeled diagnostic/parameter-justification rather than independent validation; "final test 2024–2026" clarified as a target window, not a completed period, before `2026-12-31`; added a caveat that `FROZEN_DATE` is a discipline aid, not proof of ex-ante blindness; `market_check.py` explicitly flagged as a research signal check, not a trade-ready instruction.
+* `requirements.txt` was UTF-16-encoded, same class of bug as the `.gitignore` fix above but missed at the time → re-saved as UTF-8.
+* `ArbitrageBot.iml` stayed tracked by git after `*.iml` was added to `.gitignore` — adding a pattern doesn't retroactively untrack an already-committed file → removed from tracking.
+* `main.py`'s non-positive-price guard ran on the full pre-flatten yfinance download (Open/High/Low/Close/Volume × 2 tickers), so `Volume == 0` on an ordinary day — unrelated to price validity — could trigger a "negative price detected" warning that had nothing to do with the actual WTI event the comment describes → reordered to flatten-to-Close first, then check, matching `oos_evaluation.py`; also pinned `auto_adjust=False` there and in `market_check.py` to match `oos_evaluation.py` instead of relying on yfinance's version-dependent default.
+* Kalman volatility-scaling term unconditionally zeroed out on the very first recursion step (`t == 1`) even though that step's return is already a valid, non-NaN value → redundant `t > 1` guard removed.
+* `mr_regime` exported as a mixed-type column (`0` on row one, `True`/`False` everywhere else, from `fillna(0)` on a boolean series) → `fillna(False)` + explicit `astype(bool)`.
+* `market_check.py`'s position sizing was described as approximating `risk_scale` but never actually referenced realized volatility (`capital_usd * target_annual_vol`, full stop) → `check_market_health` now calls `spread_model.compute_risk_scale` directly and `describe_trade_action` sizes against the real current value, exactly like the backtest does.
+* `monte_carlo_engine.py` fetched WTI and Brent from two independently-windowed histories with no check that their last available dates matched → unified into one aligned download; also replaced global `np.random.seed` with a local `Generator`, and softened an overstated docstring claim that a fixed seed "would defeat the purpose" of a Monte Carlo run.
+* `.gitignore` carried a UTF-8 BOM (git handled it correctly, but not every tool is that forgiving) → re-saved without one.
+* `x == x` NaN-check idiom in `validation.py` / `costs.py` (correct, but reads like a typo) → replaced with `pd.isna(...)`.
+* The final-test OOS window's end date tracked "today" on every rerun, so this README carried three different final-test Sharpe numbers at different times depending on when each artifact was last regenerated (`1.212` in the bug-impact table, `1.181` in an earlier "Results" table, `1.325` in the committed CSV) → `config.OOS_PERIODS` now freezes the end date to `FROZEN_DATE`; see the dedicated note in "OOS evaluation" above.
+* No visual evidence in the README itself, only a `plt.show()` in `main.py` that needs a live session and leaves no artifact → added `generate_report_charts.py` (reads the committed `results/*.csv`, writes the charts embedded in "Results" above) and `main.py` now also saves its equity curve to `results/charts/`.
 
 ## Known limitations (still open)
 

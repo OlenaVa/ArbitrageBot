@@ -19,6 +19,8 @@ v3 changes (this version):
   Python automatically if numba isn't installed - see the printed notice
   below).
 """
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -38,20 +40,24 @@ print(f"Numba JIT: {'enabled' if sm.NUMBA_AVAILABLE else 'not installed - fallin
 # =====================================================
 # 1. DATA LOADING
 # =====================================================
-raw = yf.download(["CL=F", "BZ=F"], start="2019-01-01", progress=False)
-
-# CL=F (WTI) went negative in April 2020 (famous negative-price event).
-# log() of a non-positive price is undefined, so those rows are dropped.
-if (raw <= 0).any().any():
-    print("Warning: zero or negative prices detected (e.g. WTI negative-price day) - dropping those rows")
-    raw = raw[raw > 0]
+raw = yf.download(["CL=F", "BZ=F"], start="2019-01-01", progress=False, auto_adjust=False)
 
 # yfinance sometimes returns a MultiIndex (field, ticker); flatten to just Close prices
 if isinstance(raw.columns, pd.MultiIndex):
     raw = raw.xs("Close", axis=1, level=0)
 
-raw = raw.dropna()
 raw = raw.rename(columns={"CL=F": "WTI", "BZ=F": "Brent"})
+raw = raw[["WTI", "Brent"]].dropna()
+
+# CL=F (WTI) went negative in April 2020 (famous negative-price event).
+# log() of a non-positive price is undefined, so those rows are dropped.
+# Checked only on the WTI/Brent Close columns (after flattening above) -
+# checking the raw pre-flatten frame would also trip on Volume == 0,
+# which is unrelated to price validity and would misfire on routine days.
+invalid = (raw <= 0).any(axis=1)
+if invalid.any():
+    print(f"Warning: removing {int(invalid.sum())} rows with non-positive WTI/Brent prices (e.g. the WTI negative-price day).")
+    raw = raw.loc[~invalid]
 
 df = pd.DataFrame(index=raw.index)
 df["WTI"] = raw["WTI"]
@@ -206,10 +212,13 @@ print(rc.summarize_roll_drag(df, "position", config.cost_per_turnover, config.ro
 # =====================================================
 # 9. EQUITY CURVE
 # =====================================================
+Path("results/charts").mkdir(parents=True, exist_ok=True)
+
 plt.figure(figsize=(12, 5))
 plt.plot(df["equity"], lw=1.6, color="black")
 plt.title("Brent-WTI Stat-Arb Backtest")
 plt.grid(alpha=0.3)
+plt.savefig("results/charts/full_history_equity_curve.png", dpi=150, bbox_inches="tight")
 plt.show()
 
 # =====================================================

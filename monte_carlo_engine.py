@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 
@@ -20,16 +21,26 @@ def run_monte_carlo_analysis(days_ahead=10, simulations=10000, volatility=None, 
 
     volatility=None -> computed from the last 30 days of real WTI returns
     instead of a hardcoded number.
-    seed=None -> every run gives a different result (a fixed seed would
-    defeat the purpose of a Monte Carlo simulation).
+    seed=None -> every run gives a different result, since no seed is set.
+    Pass an explicit seed for a reproducible run (e.g. a specific dated
+    report, or a test) - reproducibility and Monte Carlo sampling aren't
+    in tension, they're just two different use cases.
     """
-    # 1. Load recent data. period="30d"/"3d" always has at least one valid
-    # recent row even across weekends/holidays when markets are closed.
-    wti_hist = yf.Ticker("CL=F").history(period="30d")['Close']
-    brent_hist = yf.Ticker("BZ=F").history(period="3d")['Close']
+    # 1. Load recent data for both tickers from ONE aligned download, so
+    # "the latest price" for WTI and Brent always refers to the SAME
+    # calendar day. Fetching them separately (e.g. two different period=
+    # windows, one call per ticker) can silently compare two different
+    # days if the exchanges' calendars/data feeds ever diverge - a
+    # holiday observed by one but not the other, or a data delay on just
+    # one ticker. dropna() keeps only rows where both are available.
+    raw = yf.download(["CL=F", "BZ=F"], period="30d", progress=False, auto_adjust=False)
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw = raw.xs("Close", axis=1, level=0)
+    raw = raw.rename(columns={"CL=F": "WTI", "BZ=F": "Brent"}).dropna()
 
+    wti_hist = raw["WTI"]
     current_price = wti_hist.iloc[-1]
-    brent = brent_hist.iloc[-1]
+    brent = raw["Brent"].iloc[-1]
     brent_wti_diff_usd = brent - current_price
 
     # 2. Volatility: estimated from real recent WTI returns rather than a
@@ -42,15 +53,16 @@ def run_monte_carlo_analysis(days_ahead=10, simulations=10000, volatility=None, 
     daily_vol = volatility * np.sqrt(dt)
 
     # 3. Geometric Brownian motion (no drift term - the simulation assumes
-    # no expected directional move, only random daily noise)
-    if seed is not None:
-        np.random.seed(seed)
+    # no expected directional move, only random daily noise). A local
+    # Generator avoids mutating NumPy's global random state - default_rng
+    # already behaves correctly for seed=None (fresh, unseeded draws).
+    rng = np.random.default_rng(seed)
 
     price_paths = np.zeros((simulations, days_ahead + 1))
     price_paths[:, 0] = current_price
 
     for t in range(1, days_ahead + 1):
-        shocks = np.random.normal(0, daily_vol, simulations)
+        shocks = rng.normal(0, daily_vol, simulations)
         price_paths[:, t] = price_paths[:, t - 1] * np.exp(shocks)
 
     # 4. Percentiles: the "from - to" range for each day, including day `days_ahead`

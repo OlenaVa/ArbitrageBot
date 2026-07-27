@@ -23,6 +23,7 @@ Charts produced:
 """
 from pathlib import Path
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import pandas as pd
 
@@ -109,25 +110,30 @@ def plot_equity_and_drawdown(df: pd.DataFrame, results_summary: pd.DataFrame | N
         ax_eq.axhline(1.0, color="#aaaaaa", lw=0.8, ls="--")
         ax_eq.set_title(f"{label}\n{start:%Y-%m-%d} \u2192 {end:%Y-%m-%d}")
         ax_eq.set_ylim(eq_lo - eq_pad, eq_hi + eq_pad)
+        ax_eq.tick_params(axis="x", labelbottom=False)
         if col == 0:
             ax_eq.set_ylabel("Equity (start = 1.0)")
 
         if results_summary is not None and period in results_summary.index:
             row = results_summary.loc[period]
             ax_eq.text(
-                0.03, 0.06,
+                0.97, 0.06,
                 f"Sharpe {row['sharpe']:.2f}  |  Return {row['return'] * 100:.1f}%",
                 transform=ax_eq.transAxes, fontsize=8.5, color="#333333",
-                va="bottom", ha="left",
+                va="bottom", ha="right",
             )
 
         ax_dd = axes[1, col]
+        ax_dd.sharex(ax_eq)
         ax_dd.fill_between(sub["Date"], dd * 100, 0, color=MAROON, alpha=0.35, lw=0)
         ax_dd.plot(sub["Date"], dd * 100, color=MAROON, lw=1.0)
         ax_dd.set_ylim((dd_lo - dd_pad) * 100, 1.0)
         if col == 0:
             ax_dd.set_ylabel("Drawdown (%)")
-        ax_dd.tick_params(axis="x", labelrotation=30)
+        locator = mdates.MonthLocator(interval=6)
+        ax_dd.xaxis.set_major_locator(locator)
+        ax_dd.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        ax_dd.tick_params(axis="x", labelrotation=0)
 
     fig.suptitle(
         "Out-of-sample performance by period (each period is an independent test - "
@@ -155,6 +161,7 @@ def plot_beta_over_time(df: pd.DataFrame, config: StrategyConfig) -> None:
 
     ax.set_title("Kalman hedge ratio (beta) - full history, pure posterior, no clipping")
     ax.set_ylabel("beta")
+    ax.set_ylim(config.beta_warn_min - 0.15, config.beta_warn_max + 0.35)
     ax.legend(loc="upper left", fontsize=8.5, frameon=False)
     fig.tight_layout()
     fig.savefig(CHARTS_DIR / "beta_over_time.png", dpi=150, bbox_inches="tight")

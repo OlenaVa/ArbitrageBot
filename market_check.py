@@ -99,6 +99,7 @@ def describe_trade_action(health, capital_usd=100_000, config: StrategyConfig = 
     z = health["z"]
     beta = health["beta"]
     wti_price = health["wti"]
+    brent_price = health["brent"]
     entry = config.entry_threshold
     target_annual_vol = config.target_annual_vol
 
@@ -126,7 +127,19 @@ def describe_trade_action(health, capital_usd=100_000, config: StrategyConfig = 
     # checks here).
     notional = capital_usd * target_annual_vol * health["risk_scale"]
     wti_contracts = notional / (wti_price * CONTRACT_SIZE)
-    brent_contracts = wti_contracts * beta
+    # Kalman beta relates LOG-price moves: d(log Brent) ~= beta * d(log WTI).
+    # For dollar notional (N_Brent, N_WTI) to be hedged against that common
+    # component, N_Brent's dollar sensitivity to a beta-consistent move
+    # must offset N_WTI's: N_Brent * beta = N_WTI (a $1 WTI move that
+    # co-occurs with a beta-scaled % Brent move needs beta-scaled FEWER
+    # Brent dollars to produce the same offsetting $ P&L, not more).
+    # Converting dollar notional to contract counts (N = n * price * size):
+    #   n_Brent = n_WTI * WTI_price / (beta * Brent_price)
+    # NOT n_WTI * beta * (WTI_price / Brent_price) - that puts beta on the
+    # wrong side. Sanity check: at beta=1 this reduces to equal DOLLAR
+    # notional on both legs (not equal contract counts) - the right base
+    # case given WTI and Brent trade at different price levels.
+    brent_contracts = wti_contracts * wti_price / (beta * brent_price)
 
     if round(wti_contracts) == 0:
         min_capital = wti_price * CONTRACT_SIZE / (target_annual_vol * health["risk_scale"])

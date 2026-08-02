@@ -134,10 +134,10 @@ def main():
         for metric in ("sharpe", "sortino", "return"):
             lo = draws[metric].quantile(alpha)
             hi = draws[metric].quantile(1 - alpha)
-            row[f"{metric}_point"] = point[metric]
-            row[f"{metric}_ci_low"] = lo
-            row[f"{metric}_ci_high"] = hi
-            row[f"{metric}_bootstrap_median"] = draws[metric].median()
+            row[f"{metric}_point"] = round(float(point[metric]), 6)
+            row[f"{metric}_ci_low"] = round(float(lo), 6)
+            row[f"{metric}_ci_high"] = round(float(hi), 6)
+            row[f"{metric}_bootstrap_median"] = round(float(draws[metric].median()), 6)
         summary_rows.append(row)
 
         print(f"{period}  (n={len(valid)}):")

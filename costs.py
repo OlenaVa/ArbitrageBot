@@ -177,9 +177,9 @@ def run_bid_ask_layer(daily: pd.DataFrame) -> pd.DataFrame:
             rows.append({
                 "period": period,
                 "spread_ticks": n_ticks,
-                "avg_extra_cost_bps_per_day": extra_cost.mean() * 10_000,
-                "sharpe": metrics["sharpe"],
-                "return": metrics["return"],
+                "avg_extra_cost_bps_per_day": round(float(extra_cost.mean() * 10_000), 4),
+                "sharpe": round(float(metrics["sharpe"]), 6),
+                "return": round(float(metrics["return"]), 6),
             })
     return pd.DataFrame(rows)
 

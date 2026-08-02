@@ -31,17 +31,26 @@ EXIT_GRID = (0.0, 0.1, 0.2, 0.3, 0.4, 0.5)
 
 def prepare_development_data(raw: pd.DataFrame, config) -> tuple[pd.DataFrame, object]:
     start, end = OOS_PERIODS["development_2019_2021"]
-    df = raw.loc[start:end].copy()
-    if len(df) < 150:
+
+    # Compute on everything up to 'end' first, then slice to [start, end] -
+    # matching oos_evaluation.py's expanding-history pattern, so this stays
+    # correct if development ever stops being the first slice of raw (e.g.
+    # if earlier history is added later). Today start == raw's own true
+    # beginning, so this produces identical output to slicing first - this
+    # guards against future drift, it does not change today's numbers.
+    history = raw.loc[:end].copy()
+    if len(history) < 150:
         raise ValueError("Development period is too short.")
 
-    df["x"] = np.log(df["WTI"])
-    df["y"] = np.log(df["Brent"])
+    history["x"] = np.log(history["WTI"])
+    history["y"] = np.log(history["Brent"])
 
-    df, kalman_diag = sm.compute_beta_and_spread(df, config)
-    df = sm.compute_zscore(df, config)
-    df = sm.compute_regime_filter(df, config)
-    df = sm.compute_risk_scale(df, config)
+    history, kalman_diag = sm.compute_beta_and_spread(history, config)
+    history = sm.compute_zscore(history, config)
+    history = sm.compute_regime_filter(history, config)
+    history = sm.compute_risk_scale(history, config)
+
+    df = history.loc[start:end].copy()
     return df, kalman_diag
 
 

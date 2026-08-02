@@ -11,7 +11,7 @@ v3 changes (this version):
   data instead of "chosen because it seemed reasonable" (section 2.6).
 - Adds a parameter sensitivity sweep over entry/exit thresholds, run ONLY
   on the 2019-2021 development slice (section 8.6).
-- Adds a transaction-cost stress test at 0.5 / 1.0 / 2.0 bps (section 8.7).
+- Adds a transaction-cost stress test at 2.5 / 5.0 / 10.0 bps (section 8.7).
 - The walk-forward split is now explicitly labeled development /
   validation / final-test (section 8.5) - see README "Known limitations"
   for what this does and does not yet guarantee.
@@ -27,7 +27,7 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 from statsmodels.tsa.stattools import adfuller
 
-from config import StrategyConfig
+from config import StrategyConfig, FROZEN_DATE
 import spread_model as sm
 import validation as val
 import costs as ct
@@ -158,10 +158,16 @@ r = np.exp(df_valid["net_log_ret"]) - 1
 # against afterward. See README "Known limitations" for what this framing
 # does and does not yet guarantee (it is NOT yet a re-fit-per-period
 # out-of-sample test - that's a planned follow-up, not implemented here).
+#
+# Final-test end is FROZEN_DATE, not the open "2026" - a plain "2024":"2026"
+# slice would silently include every trading day through whenever this
+# script happens to be run, so this walk-forward printout would drift and
+# stop matching results/oos_results.csv (which IS pinned to FROZEN_DATE -
+# see config.py) for no reason related to anything this section tests.
 splits = {
     "2019-2021 (development)": ("2019", "2021"),
     "2022-2023 (validation)": ("2022", "2023"),
-    "2024-2026 (final test - do not tune against this)": ("2024", "2026"),
+    "2024-2026 (final test - do not tune against this)": ("2024", FROZEN_DATE),
 }
 
 print("\n=== WALK-FORWARD BY SUB-PERIOD ===")

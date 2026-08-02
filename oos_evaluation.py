@@ -111,13 +111,40 @@ def prepare_period(raw: pd.DataFrame, start: str, end: str, config) -> tuple[pd.
 
     full_perf = sm.compute_performance(history, history["position"], config.cost_per_turnover)
     history["net_log_ret"] = full_perf["net_log_ret"]
+    history["turnover"] = history["position"].diff().abs()
 
-    # Only NOW slice to the requested evaluation period, and recompute
-    # reported performance metrics scoped to that slice.
+    # Only NOW slice to the requested evaluation period. Metrics are
+    # aggregated directly from the already-computed, full-history
+    # net_log_ret/turnover above - NOT by re-invoking compute_performance
+    # on this slice, which would re-run .diff()/.shift() on a truncated
+    # frame and lose the period's first day (no visible prior row within
+    # the slice to diff against - verified: this cost exactly one day of
+    # data at the start of validation and of final-test; development's
+    # first day is separately, unavoidably NaN regardless of method,
+    # since there is no earlier data at all before the dataset's true
+    # start - see "Resolved in this version" in README.md).
     period = history.loc[start:end].copy()
-    period_perf = sm.compute_performance(period, period["position"], config.cost_per_turnover)
-    period["net_log_ret"] = period_perf["net_log_ret"]
+
+    valid = period["net_log_ret"].dropna()
+    metrics = sm.performance_metrics_from_log_returns(valid.to_numpy())
+    if len(valid) > 0:
+        equity_valid = np.exp(valid.cumsum())
+        max_dd = (equity_valid / equity_valid.cummax() - 1).min()
+    else:
+        max_dd = float("nan")
+    n_trades = int((period["turnover"].dropna() > 1e-9).sum())
+
     period["equity"] = np.exp(period["net_log_ret"].fillna(0).cumsum())
+
+    period_perf = {
+        "net_log_ret": period["net_log_ret"],
+        "equity": period["equity"],
+        "sharpe": metrics["sharpe"],
+        "sortino": metrics["sortino"],
+        "max_dd": max_dd,
+        "n_trades": n_trades,
+        "n_obs": len(valid),
+    }
 
     return period, period_perf, kalman_diag
 

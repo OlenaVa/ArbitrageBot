@@ -280,6 +280,23 @@ def compute_positions(df: pd.DataFrame, entry: float, exit_: float) -> np.ndarra
 # 6. PERFORMANCE: position path (+ a cost) -> PnL and metrics
 # =====================================================================
 
+def performance_metrics_from_log_returns(valid: np.ndarray) -> dict:
+    """Sharpe / Sortino / total return from an array of already-NaN-dropped
+    daily log returns. Factored out of compute_performance below so other
+    analyses that resample or adjust an already-computed net_log_ret series
+    (bootstrap_ci.py's block bootstrap, costs.py's bid-ask cost layer) use
+    this exact formula instead of a second, separately-typed copy of it
+    that could quietly drift out of sync with this one."""
+    if len(valid) == 0:
+        return {"sharpe": np.nan, "sortino": np.nan, "return": np.nan}
+    r = np.exp(valid) - 1.0
+    sharpe = (r.mean() / (r.std(ddof=1) + 1e-12)) * np.sqrt(252)
+    down = r[r < 0]
+    sortino = (r.mean() / (down.std(ddof=1) + 1e-12)) * np.sqrt(252) if len(down) > 0 else np.nan
+    total_return = np.exp(valid.sum()) - 1.0
+    return {"sharpe": sharpe, "sortino": sortino, "return": total_return}
+
+
 def compute_performance(df: pd.DataFrame, position, cost: float) -> dict:
     """
     Turns a (risk-scaled) position path into PnL and standard metrics.
@@ -288,6 +305,10 @@ def compute_performance(df: pd.DataFrame, position, cost: float) -> dict:
     validation.run_parameter_sensitivity, and costs.run_cost_stress_test -
     so all four report numbers computed exactly the same way, varying only
     what each of them is actually testing (thresholds, or cost, or window).
+    The Sharpe/Sortino/return math itself lives in
+    performance_metrics_from_log_returns above, also reused directly by
+    bootstrap_ci.py and costs.run_bid_ask_layer, which adjust an
+    already-computed net_log_ret rather than a raw position path.
 
     `position` may be a pd.Series or np.ndarray aligned to df.index - the
     already risk-scaled position, BEFORE the one-day lag applied here.
@@ -317,18 +338,15 @@ def compute_performance(df: pd.DataFrame, position, cost: float) -> dict:
             "n_trades": n_trades, "n_obs": len(valid),
         }
 
-    r = np.exp(valid) - 1
-    sharpe = (r.mean() / (r.std() + 1e-12)) * np.sqrt(252)
-    down = r[r < 0]
-    sortino = (r.mean() / (down.std() + 1e-12)) * np.sqrt(252) if len(down) > 0 else np.nan
+    metrics = performance_metrics_from_log_returns(valid.to_numpy())
     equity = np.exp(valid.cumsum())
     max_dd = (equity / equity.cummax() - 1).min()
 
     return {
         "net_log_ret": net_log_ret,
         "equity": equity,
-        "sharpe": sharpe,
-        "sortino": sortino,
+        "sharpe": metrics["sharpe"],
+        "sortino": metrics["sortino"],
         "max_dd": max_dd,
         "n_trades": n_trades,
         "n_obs": len(valid),
